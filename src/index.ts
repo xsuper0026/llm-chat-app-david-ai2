@@ -2,98 +2,109 @@
  * LLM Chat Application Template
  *
  * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
+ * Streaming responses using Server-Sent Events (SSE).
  *
  * @license MIT
  */
-import { Env, ChatMessage } from "./types";
 
-// Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
 const MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-
-// Default system prompt
 const SYSTEM_PROMPT =
   "You are a helpful, friendly assistant. Provide concise and accurate responses.";
 
+export interface Env {
+  AI: Ai;
+  ASSETS: Fetcher;
+}
+
+interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+interface ChatRequestBody {
+  messages?: ChatMessage[];
+}
+
 export default {
-  /**
-   * Main request handler for the Worker
-   */
   async fetch(
     request: Request,
     env: Env,
-    ctx: ExecutionContext,
+    ctx: ExecutionContext
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle static assets (frontend)
+    // 靜態資源路由
     if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+      if (!env.ASSETS) {
+        return new Response(
+          "ASSETS binding is not configured. Please check wrangler.jsonc.",
+          { status: 500 }
+        );
+      }
       return env.ASSETS.fetch(request);
     }
 
-    // API Routes
+    // API 路由
     if (url.pathname === "/api/chat") {
-      // Handle POST requests for chat
       if (request.method === "POST") {
         return handleChatRequest(request, env);
       }
-
-      // Method not allowed for other request types
       return new Response("Method not allowed", { status: 405 });
     }
 
-    // Handle 404 for unmatched routes
     return new Response("Not found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
 
-/**
- * Handles chat API requests
- */
 async function handleChatRequest(
   request: Request,
-  env: Env,
+  env: Env
 ): Promise<Response> {
   try {
-    // Parse JSON request body
-    const { messages = [] } = (await request.json()) as {
-      messages: ChatMessage[];
-    };
+    if (!env.AI) {
+      return new Response(
+        JSON.stringify({
+          error: "AI binding is not configured. Please check wrangler.jsonc.",
+        }),
+        {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }
+      );
+    }
 
-    // Add system prompt if not present
+    const body = (await request.json()) as ChatRequestBody;
+    const messages: ChatMessage[] = body.messages ?? [];
+
     if (!messages.some((msg) => msg.role === "system")) {
       messages.unshift({ role: "system", content: SYSTEM_PROMPT });
     }
 
+    // 呼叫 Workers AI + Streaming SSE
     const response = await env.AI.run(
       MODEL_ID,
       {
         messages,
         max_tokens: 1024,
+        stream: true,          // ⭐ 關鍵：啟用 SSE streaming
       },
       {
         returnRawResponse: true,
-        // Uncomment to use AI Gateway
-        // gateway: {
-        //   id: "YOUR_GATEWAY_ID", // Replace with your AI Gateway ID
-        //   skipCache: false,      // Set to true to bypass cache
-        //   cacheTtl: 3600,        // Cache time-to-live in seconds
-        // },
-      },
+      }
     );
 
-    // Return streaming response
     return response;
   } catch (error) {
     console.error("Error processing chat request:", error);
     return new Response(
-      JSON.stringify({ error: "Failed to process request" }),
+      JSON.stringify({
+        error: "Failed to process request",
+        detail: error instanceof Error ? error.message : String(error),
+      }),
       {
         status: 500,
         headers: { "content-type": "application/json" },
-      },
+      }
     );
   }
 }
