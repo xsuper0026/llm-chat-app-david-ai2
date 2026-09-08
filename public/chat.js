@@ -61,6 +61,14 @@ function serializeError(error) {
   return String(error);
 }
 
+// 統一「被擋 / 失敗」處理：把該則移出歷史，確保後續問題不受影響。
+// 這是「問完不正常問題後、正常問題仍能問」的關鍵。
+function markBlocked(assistantMessageEl, assistantTextEl, historyLengthBeforeSend, text) {
+  chatHistory.length = historyLengthBeforeSend;
+  assistantTextEl.textContent = text;
+  assistantMessageEl.style.color = "#c0392b";
+}
+
 async function sendMessage() {
   const message = userInput.value.trim();
 
@@ -99,26 +107,31 @@ async function sendMessage() {
       }),
     });
 
+    // 任何非 2xx（含 WAF 的 403）都視為被擋：清除該則，讓後續正常問題不受影響。
     if (!response.ok) {
-      let errorDetail = "HTTP " + response.status + " " + response.statusText;
-      try {
-        const errorData = await response.json();
-        const err =
-          typeof errorData.error === "string"
-            ? errorData.error
-            : JSON.stringify(errorData.error || "");
-        const detail =
-          typeof errorData.detail === "string"
-            ? errorData.detail
-            : JSON.stringify(errorData.detail || "");
-        errorDetail = (err || "Error") + (detail ? " - " + detail : "") + " (HTTP " + response.status + ")";
-      } catch {
-        // keep default
+      let hint = "";
+      if (response.status === 403) {
+        hint = "（此訊息含有被攔截的內容）";
+      } else {
+        hint = "（HTTP " + response.status + "）";
       }
-      throw new Error(errorDetail);
+      markBlocked(
+        assistantMessageEl,
+        assistantTextEl,
+        historyLengthBeforeSend,
+        "您問的問題可能含有不當內容，已被攔截。這則訊息已從對話中移除，請重新發問。" + hint
+      );
+      return;
     }
+
     if (!response.body) {
-      throw new Error("Response body is null");
+      markBlocked(
+        assistantMessageEl,
+        assistantTextEl,
+        historyLengthBeforeSend,
+        "沒有收到回應內容，這則訊息已從對話中移除，請重新發問。"
+      );
+      return;
     }
 
     const reader = response.body.getReader();
@@ -203,21 +216,27 @@ async function sendMessage() {
       if (sawDone) break;
     }
 
+    // 有回應 → 存進歷史（保留多輪記憶）；沒回應 → 當作被擋，清除該則
     if (responseText.length > 0) {
       chatHistory.push({ role: "assistant", content: responseText });
     } else {
-      chatHistory.length = historyLengthBeforeSend;
-      assistantTextEl.textContent = "您問的問題可能違反內容政策，無法回覆。這則訊息已從對話中移除，請重新發問。";
-      assistantMessageEl.style.color = "#c0392b";
+      markBlocked(
+        assistantMessageEl,
+        assistantTextEl,
+        historyLengthBeforeSend,
+        "您問的問題可能違反內容政策，無法回覆。這則訊息已從對話中移除，請重新發問。"
+      );
     }
   } catch (error) {
     console.error("Error:", error);
-
-    chatHistory.length = historyLengthBeforeSend;
-
-    const errorMessage = serializeError(error);
-    assistantTextEl.textContent = "Sorry, 您問的問題有不當文字，請重新發問。（錯誤詳情：" + errorMessage + "）";
-    assistantMessageEl.style.color = "#c0392b";
+    markBlocked(
+      assistantMessageEl,
+      assistantTextEl,
+      historyLengthBeforeSend,
+      "抱歉，這則訊息處理失敗（可能含有被攔截的內容）。這則訊息已從對話中移除，請重新發問。（錯誤詳情：" +
+        serializeError(error) +
+        "）"
+    );
   } finally {
     typingIndicator.classList.remove("visible");
     isProcessing = false;
